@@ -84,7 +84,7 @@ def run_featquery(feat_dir, roi_path, roi_name, stats_images,
         + available_stats
         + [output_name]
         + flags
-        + ["-b", roi_path]
+        + [roi_path]
     )
 
     print(f"    [CMD] {' '.join(cmd)}")
