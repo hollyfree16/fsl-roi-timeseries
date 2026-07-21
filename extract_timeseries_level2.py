@@ -1,15 +1,19 @@
 """
-extract_timeseries.py
+extract_timeseries_level2.py
 
 Extracts the mean BOLD time series from the largest activation cluster
-that overlaps with each ROI mask (produced by run_featquery.py).
+that overlaps with each ROI mask, from group/level-2 (.gfeat/cope*.feat)
+outputs produced by run_featquery_level2.py.
 
-For each .feat dir + ROI combination:
-  - Finds the largest cluster (by ROI overlap) in cluster_mask_zstat1.nii.gz
+For each cope*.feat dir + ROI combination:
+  - Finds the largest cluster (by ROI overlap) in cluster_mask_zstat1.nii.gz,
+    using the cluster table cluster_zstat1_std.txt (level 2 names this
+    differently from level 1's cluster_zstat1.txt)
   - Averages filtered_func_data.nii.gz across all voxels in cluster ∩ ROI
   - Saves a CSV with columns:
       timepoint, mean_bold,
       rot_x, rot_y, rot_z, trans_x, trans_y, trans_z, fd
+    Level-2 runs have no motion .par file, so the motion columns are NaN.
   - Saves a QC mask (_mask.nii.gz) showing the exact voxels extracted from
 
 Also saves a responder summary CSV with per-subject ROI voxel counts, mean
@@ -17,8 +21,8 @@ z-stat (raw and suprathreshold-only), suprathreshold voxel count, and
 responder status (responder = any cluster voxels within ROI > 0).
 
 Usage:
-    python extract_timeseries.py
-    python extract_timeseries.py --dry-run
+    python extract_timeseries_level2.py
+    python extract_timeseries_level2.py --dry-run
 """
 
 import os
@@ -27,20 +31,20 @@ import argparse
 import numpy as np
 import nibabel as nib
 import pandas as pd
-from config_extract import FEAT_BASE, OUTPUT_BASE, ROI_TASK_MAP, SUBJECTS
+from config_extract_level2 import FEAT_BASE, OUTPUT_BASE, ROI_TASK_MAP, SUBJECTS
 
 
 # -----------------------------------------------------------------------------
 # Motion helpers
 # -----------------------------------------------------------------------------
 
-def load_motion_params(feat_dir):
+def load_motion_params(cope_dir):
     """
     Load the FSL motion parameter file from the standard location.
     Returns an (N, 6) array [rotX, rotY, rotZ, transX, transY, transZ]
-    or None if the file is not found.
+    or None if the file is not found (expected at level 2 — no .par file).
     """
-    par_path = os.path.join(feat_dir, "mc", "prefiltered_func_data_mcf.par")
+    par_path = os.path.join(cope_dir, "mc", "prefiltered_func_data_mcf.par")
     if not os.path.exists(par_path):
         return None
     try:
@@ -104,30 +108,30 @@ def _peak_voxel(data, mask_bool):
     return float(data[idx]), idx
 
 
-def compute_zstat_metrics(feat_dir, roi_bin, extraction_mask=None):
+def compute_zstat_metrics(cope_dir, roi_bin, extraction_mask=None):
     """
     Compute average/peak z-stat and suprathreshold voxel count for an ROI.
 
-    Reads directly from the FEAT dir's own stats images (independent of
-    featquery/cluster_mask), so this works even for non-responders. Peak
+    Reads directly from the cope*.feat dir's own stats images (independent
+    of featquery/cluster_mask), so this works even for non-responders. Peak
     voxel coordinates are native functional-space voxel indices (i, j, k),
     matching the space of the QC mask, for easy lookup in FSLeyes.
 
     Returns a dict with keys:
-        mean_zstat_roi            : mean of raw stats/zstat1.nii.gz across the
-                                     whole native-space ROI mask
-        peak_zstat_roi            : max of raw z-stat across the whole ROI mask
-        peak_vox_roi_x/y/z        : voxel coords of that peak (native space)
-        mean_zstat_extraction     : mean of raw z-stat across the extraction
-                                     mask (largest cluster ∩ ROI), NaN if no
-                                     extraction mask was passed
-        peak_zstat_extraction     : max of raw z-stat across the extraction mask
-        peak_vox_extraction_x/y/z : voxel coords of that peak (native space)
-        n_suprathreshold_vox      : voxels in the ROI where thresh_zstat1.nii.gz
-                                     (FSL's cluster-corrected thresholded map)
-                                     is nonzero
-        mean_suprathreshold_zstat : mean of thresh_zstat1.nii.gz among those
-                                     suprathreshold voxels only, NaN if none
+        mean_zstat_roi             : mean of raw stats/zstat1.nii.gz across the
+                                      whole native-space ROI mask
+        peak_zstat_roi              : max of raw z-stat across the whole ROI mask
+        peak_vox_roi_x/y/z          : voxel coords of that peak (native space)
+        mean_zstat_extraction       : mean of raw z-stat across the extraction
+                                       mask (largest cluster ∩ ROI), NaN if no
+                                       extraction mask was passed
+        peak_zstat_extraction       : max of raw z-stat across the extraction mask
+        peak_vox_extraction_x/y/z   : voxel coords of that peak (native space)
+        n_suprathreshold_vox       : voxels in the ROI where thresh_zstat1.nii.gz
+                                      (FSL's cluster-corrected thresholded map)
+                                      is nonzero
+        mean_suprathreshold_zstat  : mean of thresh_zstat1.nii.gz among those
+                                      suprathreshold voxels only, NaN if none
     """
     metrics = {
         "mean_zstat_roi"           : np.nan,
@@ -144,8 +148,8 @@ def compute_zstat_metrics(feat_dir, roi_bin, extraction_mask=None):
         "mean_suprathreshold_zstat": np.nan,
     }
 
-    zstat_path        = os.path.join(feat_dir, "stats", "zstat1.nii.gz")
-    thresh_zstat_path = os.path.join(feat_dir, "thresh_zstat1.nii.gz")
+    zstat_path        = os.path.join(cope_dir, "stats", "zstat1.nii.gz")
+    thresh_zstat_path = os.path.join(cope_dir, "thresh_zstat1.nii.gz")
     roi_bool           = roi_bin.astype(bool)
 
     if os.path.exists(zstat_path):
@@ -178,33 +182,46 @@ def compute_zstat_metrics(feat_dir, roi_bin, extraction_mask=None):
 
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helpers — file discovery
 # -----------------------------------------------------------------------------
 
-def find_feat_dirs(base_dir, task_filters, subjects=None):
+def find_cope_dirs(base_dir, task_filters, copes, subjects=None):
     """
-    Find all .feat dirs whose basename contains any task in task_filters.
-    If subjects is a list, only include dirs matching those subject IDs.
+    Find all cope*.feat dirs inside matching .gfeat directories.
+    Returns a list of (gfeat_dir, cope_dir) tuples.
     """
-    all_dirs = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.feat")))
-    filtered = [d for d in all_dirs
-                if any(task in os.path.basename(d) for task in task_filters)]
+    all_gfeats = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.gfeat")))
+    filtered   = [d for d in all_gfeats
+                  if any(task in os.path.basename(d) for task in task_filters)]
     if subjects is not None:
         filtered = [d for d in filtered
                     if any(sub in os.path.basename(d) for sub in subjects)]
-    return filtered
+
+    results = []
+    for gfeat_dir in filtered:
+        for cope in copes:
+            cope_dir = os.path.join(gfeat_dir, cope)
+            if os.path.isdir(cope_dir):
+                results.append((gfeat_dir, cope_dir))
+            else:
+                print(f"  [WARN] cope dir not found: {cope_dir}")
+    return results
 
 
-def get_output_paths(feat_dir, roi_name, output_base):
-    """Return (csv_path, mask_path) for a given feat dir and ROI."""
-    feat_name = os.path.basename(feat_dir).replace(".feat", "")
+def get_output_paths(gfeat_dir, cope_dir, roi_name, output_base):
+    """Return (csv_path, mask_path, run_name) for a given gfeat/cope dir and ROI."""
+    run_name  = f"{os.path.basename(gfeat_dir).replace('.gfeat', '')}_{os.path.basename(cope_dir).replace('.feat', '')}"
     out_dir   = os.path.join(output_base, roi_name, "timeseries")
-    csv_path  = os.path.join(out_dir, f"{feat_name}_{roi_name}_timeseries.csv")
-    mask_path = os.path.join(out_dir, f"{feat_name}_{roi_name}_mask.nii.gz")
-    return csv_path, mask_path
+    csv_path  = os.path.join(out_dir, f"{run_name}_{roi_name}_timeseries.csv")
+    mask_path = os.path.join(out_dir, f"{run_name}_{roi_name}_mask.nii.gz")
+    return csv_path, mask_path, run_name
 
 
-def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
+# -----------------------------------------------------------------------------
+# Extraction
+# -----------------------------------------------------------------------------
+
+def extract(cope_dir, roi_name, csv_path, mask_path, dry_run=False):
     """
     Extract mean BOLD time series from largest cluster within ROI.
 
@@ -222,10 +239,12 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
         n_suprathreshold_vox       : voxels in the ROI surviving cluster-corrected threshold
         mean_suprathreshold_zstat  : mean thresholded z-stat among suprathreshold voxels
     """
-    cluster_mask_path  = os.path.join(feat_dir, "cluster_mask_zstat1.nii.gz")
-    cluster_txt_path   = os.path.join(feat_dir, "cluster_zstat1.txt")
-    filtered_func_path = os.path.join(feat_dir, "filtered_func_data.nii.gz")
-    roi_mask_path      = os.path.join(feat_dir, f"{roi_name}.featquery", "mask.nii.gz")
+    # Level 2 (.gfeat) names the cluster table cluster_zstat1_std.txt,
+    # unlike level 1's cluster_zstat1.txt
+    cluster_mask_path  = os.path.join(cope_dir, "cluster_mask_zstat1.nii.gz")
+    cluster_txt_path   = os.path.join(cope_dir, "cluster_zstat1_std.txt")
+    filtered_func_path = os.path.join(cope_dir, "filtered_func_data.nii.gz")
+    roi_mask_path       = os.path.join(cope_dir, f"{roi_name}.featquery", "mask.nii.gz")
 
     result = {
         "status"                   : None,
@@ -246,7 +265,6 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
         "mean_suprathreshold_zstat": np.nan,
     }
 
-    # Check required files
     required = {
         "cluster_mask"  : cluster_mask_path,
         "cluster_txt"   : cluster_txt_path,
@@ -269,7 +287,7 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
         if os.path.exists(mask_path):
             extraction_mask = (nib.load(mask_path).get_fdata() > 0.5).astype(int)
             result["extraction_vox"] = int(extraction_mask.sum())
-        result.update(compute_zstat_metrics(feat_dir, roi_bin, extraction_mask))
+        result.update(compute_zstat_metrics(cope_dir, roi_bin, extraction_mask))
         print(f"    [SKIP] Already exists: {csv_path}")
         return result
 
@@ -278,7 +296,6 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
         result["status"] = "dry_run"
         return result
 
-    # Load images
     cluster_mask_img  = nib.load(cluster_mask_path)
     cluster_mask_data = cluster_mask_img.get_fdata()
     roi_bin           = (nib.load(roi_mask_path).get_fdata() > 0.5).astype(int)
@@ -289,11 +306,9 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
         result["status"] = "skip_empty_roi"
         return result
 
-    # Read cluster table
     cluster_df = pd.read_csv(cluster_txt_path, sep="\t")
     cluster_df.columns = [c.strip() for c in cluster_df.columns]
 
-    # Find cluster with most overlap with ROI
     best_idx, best_overlap = None, 0
     for _, row in cluster_df.iterrows():
         cidx    = int(row["Cluster Index"])
@@ -309,29 +324,22 @@ def extract(feat_dir, roi_name, csv_path, mask_path, dry_run=False):
 
     print(f"    Cluster {best_idx} selected — {best_overlap} voxels overlap with ROI")
 
-    # Build combined mask (largest cluster ∩ ROI)
     combined_mask = ((cluster_mask_data == best_idx) * roi_bin).astype(np.int16)
     n_vox         = int(combined_mask.sum())
     result["extraction_vox"]  = n_vox
     result["all_cluster_vox"] = int(((cluster_mask_data > 0) * roi_bin).sum())
-    result.update(compute_zstat_metrics(feat_dir, roi_bin, combined_mask))
+    result.update(compute_zstat_metrics(cope_dir, roi_bin, combined_mask))
 
-    # Save QC mask
     os.makedirs(os.path.dirname(mask_path), exist_ok=True)
     nib.save(nib.Nifti1Image(combined_mask, cluster_mask_img.affine), mask_path)
 
-    # Extract mean time series across mask voxels
     func_data = nib.load(filtered_func_path).get_fdata()
     mean_ts   = func_data[combined_mask.astype(bool), :].mean(axis=0)
     n_tp      = len(mean_ts)
 
-    # Load motion parameters
-    motion_params = load_motion_params(feat_dir)
-    if motion_params is None:
-        print(f"    [WARN] No .par file found — motion columns will be NaN")
+    motion_params = load_motion_params(cope_dir)
     mot_cols = motion_columns(motion_params, n_tp)
 
-    # Save CSV
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     pd.DataFrame({
         "timepoint": np.arange(n_tp),
@@ -355,23 +363,26 @@ def main(dry_run=False):
     for roi_cfg in ROI_TASK_MAP:
         roi_name = roi_cfg["roi_name"]
         tasks    = roi_cfg["tasks"]
+        copes    = roi_cfg["copes"]
 
         print(f"\n{'='*70}")
         print(f"ROI  : {roi_name}")
         print(f"Tasks: {tasks}")
+        print(f"Copes: {copes}")
         print(f"{'='*70}")
 
-        feat_dirs = find_feat_dirs(FEAT_BASE, tasks, subjects=SUBJECTS)
-        print(f"  Found {len(feat_dirs)} matching .feat directories\n")
+        cope_dirs = find_cope_dirs(FEAT_BASE, tasks, copes, subjects=SUBJECTS)
+        print(f"  Found {len(cope_dirs)} matching cope directories\n")
 
-        for feat_dir in feat_dirs:
-            feat_name            = os.path.basename(feat_dir)
-            csv_path, mask_path  = get_output_paths(feat_dir, roi_name, OUTPUT_BASE)
+        for gfeat_dir, cope_dir in cope_dirs:
+            csv_path, mask_path, run_name = get_output_paths(
+                gfeat_dir, cope_dir, roi_name, OUTPUT_BASE
+            )
 
-            print(f"  -- {feat_name}")
+            print(f"  -- {run_name}")
 
             result = extract(
-                feat_dir  = feat_dir,
+                cope_dir  = cope_dir,
                 roi_name  = roi_name,
                 csv_path  = csv_path,
                 mask_path = mask_path,
@@ -380,13 +391,13 @@ def main(dry_run=False):
 
             summary.append({
                 "roi"   : roi_name,
-                "feat"  : feat_name,
+                "run"   : run_name,
                 "status": result["status"],
             })
 
             if result["roi_vox"] is not None:
                 responders.append({
-                    "feat"                     : feat_name,
+                    "run"                      : run_name,
                     "roi"                      : roi_name,
                     "roi_vox"                  : result["roi_vox"],
                     "extraction_vox"           : result["extraction_vox"],
@@ -409,7 +420,6 @@ def main(dry_run=False):
                     ),
                 })
 
-    # Extraction summary
     df_summary = pd.DataFrame(summary)
     if not df_summary.empty:
         print(f"\n{'='*70}")
@@ -426,7 +436,6 @@ def main(dry_run=False):
                 os.path.join(OUTPUT_BASE, "extraction_summary.csv"), index=False
             )
 
-    # Responder summary
     if responders and not dry_run:
         df_resp = pd.DataFrame(responders)
         print(f"\n{'='*70}")
@@ -438,7 +447,7 @@ def main(dry_run=False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract mean BOLD time series from ROI clusters.")
+    parser = argparse.ArgumentParser(description="Extract mean BOLD time series from level-2 ROI clusters.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview without executing")
     args = parser.parse_args()

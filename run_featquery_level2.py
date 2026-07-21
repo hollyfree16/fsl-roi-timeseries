@@ -1,17 +1,18 @@
 """
-run_featquery.py
+run_featquery_level2.py
 
-Runs FSL featquery on all matching .feat directories for each ROI/task
-combination defined in config_featquery.py.
+Runs FSL featquery on all matching cope*.feat directories inside .gfeat
+(group/level-2) directories, for each ROI/task combination defined in
+config_featquery_level2.py.
 
-Checks which stats images actually exist in each .feat dir before
-building the command, so subjects with fewer PEs won't crash.
+Checks which stats images actually exist in each cope*.feat dir before
+building the command, so copes with fewer stats images won't crash.
 
 Usage:
-    python run_featquery.py
-    python run_featquery.py --dry-run
-    python run_featquery.py --subject sub-CP016
-    python run_featquery.py --workers 4
+    python run_featquery_level2.py
+    python run_featquery_level2.py --dry-run
+    python run_featquery_level2.py --subject sub-CP016
+    python run_featquery_level2.py --workers 4
 """
 
 import os
@@ -20,7 +21,7 @@ import argparse
 import subprocess
 import pandas as pd
 from multiprocessing import Pool, cpu_count
-from config_featquery import (
+from config_featquery_level2 import (
     FEATQUERY_BIN, FEAT_BASE, STATS_IMAGES,
     FEATQUERY_FLAGS, ROI_TASK_MAP, SUBJECTS
 )
@@ -30,60 +31,57 @@ from config_featquery import (
 # Helpers
 # -----------------------------------------------------------------------------
 
-def find_feat_dirs(base_dir, task_filters, subjects=None):
+def find_cope_dirs(base_dir, task_filters, copes, subjects=None):
     """
-    Find all .feat dirs whose basename contains any task in task_filters.
-    If subjects is a list, only include dirs matching those subject IDs.
+    Find all cope*.feat dirs inside matching .gfeat directories.
+    Returns a list of (gfeat_dir, cope_dir) tuples.
     """
-    all_dirs = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.feat")))
-    filtered = [d for d in all_dirs
-                if any(task in os.path.basename(d) for task in task_filters)]
+    all_gfeats = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.gfeat")))
+    filtered   = [d for d in all_gfeats
+                  if any(task in os.path.basename(d) for task in task_filters)]
     if subjects is not None:
         filtered = [d for d in filtered
                     if any(sub in os.path.basename(d) for sub in subjects)]
-    return filtered
+
+    results = []
+    for gfeat_dir in filtered:
+        for cope in copes:
+            cope_dir = os.path.join(gfeat_dir, cope)
+            if os.path.isdir(cope_dir):
+                results.append((gfeat_dir, cope_dir))
+            else:
+                print(f"  [WARN] cope dir not found: {cope_dir}")
+    return results
 
 
-def get_existing_stats(feat_dir, stats_images):
-    """Return only the stats image paths that actually exist in feat_dir."""
+def get_existing_stats(cope_dir, stats_images):
+    """Return only the stats image paths that actually exist in cope_dir."""
     existing = []
     for img in stats_images:
-        # FSL stores without extension internally; check both with and without
-        path_no_ext = os.path.join(feat_dir, img)
-        path_nii_gz = os.path.join(feat_dir, img + ".nii.gz")
+        path_no_ext = os.path.join(cope_dir, img)
+        path_nii_gz = os.path.join(cope_dir, img + ".nii.gz")
         if os.path.exists(path_nii_gz) or os.path.exists(path_no_ext):
             existing.append(img)
     return existing
 
 
-def run_featquery(feat_dir, roi_path, roi_name, stats_images,
-                  flags, dry_run=False):
-    """
-    Build and run the featquery command for one .feat dir + ROI.
-
-    Command format:
-        featquery 1 <feat_dir> <n_stats> <stats...> <output_name> \
-            [flags] -b <roi_path>
-    """
+def run_featquery(cope_dir, roi_path, roi_name, stats_images, flags, dry_run=False):
+    """Build and run the featquery command for one cope*.feat dir + ROI."""
     output_name   = f"{roi_name}.featquery"
-    featquery_dir = os.path.join(feat_dir, output_name)
+    featquery_dir = os.path.join(cope_dir, output_name)
     mask_out      = os.path.join(featquery_dir, "mask.nii.gz")
 
     if os.path.exists(mask_out):
         print(f"    [SKIP] Already exists: {featquery_dir}")
         return "already_done"
 
-    # Only request stats images that exist in this feat dir
-    available_stats = get_existing_stats(feat_dir, stats_images)
+    available_stats = get_existing_stats(cope_dir, stats_images)
     if not available_stats:
-        print(f"    [SKIP] No stats images found in {feat_dir}")
+        print(f"    [SKIP] No stats images found in {cope_dir}")
         return "skip_no_stats"
 
     cmd = (
-        [FEATQUERY_BIN,
-         "1",
-         feat_dir,
-         str(len(available_stats))]
+        [FEATQUERY_BIN, "1", cope_dir, str(len(available_stats))]
         + available_stats
         + [output_name]
         + flags
@@ -96,9 +94,7 @@ def run_featquery(feat_dir, roi_path, roi_name, stats_images,
         return "dry_run"
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=feat_dir
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=cope_dir)
         if result.returncode != 0:
             print(f"    [ERROR] returncode={result.returncode}")
             print(f"    [STDERR] {result.stderr.strip()}")
@@ -111,24 +107,24 @@ def run_featquery(feat_dir, roi_path, roi_name, stats_images,
 
 
 def _run_one(args):
-    """Top-level wrapper so a feat_dir + ROI job is picklable for Pool.map."""
-    feat_dir, roi_path, roi_name, stats_images, flags, dry_run = args
-    feat_name = os.path.basename(feat_dir)
-    print(f"  -- {feat_name}")
+    """Top-level wrapper so a cope_dir + ROI job is picklable for Pool.map."""
+    gfeat_dir, cope_dir, roi_path, roi_name, stats_images, flags, dry_run = args
+    label = os.path.join(os.path.basename(gfeat_dir), os.path.basename(cope_dir))
+    print(f"  -- {label}")
 
-    if not os.path.exists(os.path.join(feat_dir, "design.fsf")):
+    if not os.path.exists(os.path.join(cope_dir, "design.fsf")):
         print(f"    [SKIP] No design.fsf found")
-        return {"roi": roi_name, "feat": feat_name, "status": "skip_no_fsf"}
+        return {"roi": roi_name, "cope": label, "status": "skip_no_fsf"}
 
     status = run_featquery(
-        feat_dir     = feat_dir,
+        cope_dir     = cope_dir,
         roi_path     = roi_path,
         roi_name     = roi_name,
         stats_images = stats_images,
         flags        = flags,
         dry_run      = dry_run,
     )
-    return {"roi": roi_name, "feat": feat_name, "status": status}
+    return {"roi": roi_name, "cope": label, "status": status}
 
 
 # -----------------------------------------------------------------------------
@@ -143,26 +139,28 @@ def main(dry_run=False, subject_override=None, n_workers=1):
         roi_path = roi_cfg["roi_path"]
         roi_name = roi_cfg["roi_name"]
         tasks    = roi_cfg["tasks"]
+        copes    = roi_cfg["copes"]
 
         print(f"\n{'='*70}")
         print(f"ROI  : {roi_name}")
         print(f"Tasks: {tasks}")
+        print(f"Copes: {copes}")
         print(f"{'='*70}")
 
         if not os.path.exists(roi_path):
             print(f"  [ERROR] ROI file not found: {roi_path} — skipping")
             continue
 
-        feat_dirs = find_feat_dirs(FEAT_BASE, tasks, subjects=subjects)
-        print(f"  Found {len(feat_dirs)} matching .feat directories")
+        cope_dirs = find_cope_dirs(FEAT_BASE, tasks, copes, subjects=subjects)
+        print(f"  Found {len(cope_dirs)} matching cope directories")
         if n_workers > 1:
             print(f"  Running with {n_workers} parallel workers\n")
         else:
             print()
 
         job_args = [
-            (feat_dir, roi_path, roi_name, STATS_IMAGES, FEATQUERY_FLAGS, dry_run)
-            for feat_dir in feat_dirs
+            (gfeat_dir, cope_dir, roi_path, roi_name, STATS_IMAGES, FEATQUERY_FLAGS, dry_run)
+            for gfeat_dir, cope_dir in cope_dirs
         ]
 
         if n_workers > 1 and not dry_run:
@@ -173,7 +171,6 @@ def main(dry_run=False, subject_override=None, n_workers=1):
 
         summary.extend(results)
 
-    # Print summary
     df = pd.DataFrame(summary)
     if not df.empty:
         print(f"\n{'='*70}")
@@ -189,7 +186,7 @@ def main(dry_run=False, subject_override=None, n_workers=1):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Batch FSL featquery runner.")
+    parser = argparse.ArgumentParser(description="Batch FSL featquery runner (level 2 / .gfeat).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing them")
     parser.add_argument("--subject", type=str, default=None,
