@@ -16,54 +16,20 @@ Usage:
 """
 
 import os
-import glob
 import argparse
 import subprocess
 import pandas as pd
 from multiprocessing import Pool, cpu_count
-from config_featquery_level2 import (
+from config.config_featquery_level2 import (
     FEATQUERY_BIN, FEAT_BASE, STATS_IMAGES,
     FEATQUERY_FLAGS, ROI_TASK_MAP, SUBJECTS
 )
+from util.discovery import find_cope_dirs, get_existing_stats
 
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-
-def find_cope_dirs(base_dir, task_filters, copes, subjects=None):
-    """
-    Find all cope*.feat dirs inside matching .gfeat directories.
-    Returns a list of (gfeat_dir, cope_dir) tuples.
-    """
-    all_gfeats = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.gfeat")))
-    filtered   = [d for d in all_gfeats
-                  if any(task in os.path.basename(d) for task in task_filters)]
-    if subjects is not None:
-        filtered = [d for d in filtered
-                    if any(sub in os.path.basename(d) for sub in subjects)]
-
-    results = []
-    for gfeat_dir in filtered:
-        for cope in copes:
-            cope_dir = os.path.join(gfeat_dir, cope)
-            if os.path.isdir(cope_dir):
-                results.append((gfeat_dir, cope_dir))
-            else:
-                print(f"  [WARN] cope dir not found: {cope_dir}")
-    return results
-
-
-def get_existing_stats(cope_dir, stats_images):
-    """Return only the stats image paths that actually exist in cope_dir."""
-    existing = []
-    for img in stats_images:
-        path_no_ext = os.path.join(cope_dir, img)
-        path_nii_gz = os.path.join(cope_dir, img + ".nii.gz")
-        if os.path.exists(path_nii_gz) or os.path.exists(path_no_ext):
-            existing.append(img)
-    return existing
-
 
 def run_featquery(cope_dir, roi_path, roi_name, stats_images, flags, dry_run=False):
     """Build and run the featquery command for one cope*.feat dir + ROI."""

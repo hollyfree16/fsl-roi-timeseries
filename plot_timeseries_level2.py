@@ -27,44 +27,19 @@ Usage:
 
 import os
 import re
-import glob
 import json
 import argparse
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from config_plot_level2 import FEAT_BASE, OUTPUT_BASE, TASK_COLOR, ROI_TASK_MAP, SUBJECTS
+from config.config_plot_level2 import FEAT_BASE, OUTPUT_BASE, TASK_COLOR, ROI_TASK_MAP, SUBJECTS
+from util.discovery import find_cope_dirs
+from util.fsf import resolve_timing_level2 as resolve_timing
+from util.plotting import save_plot, parse_feat_meta
 
 
 # -----------------------------------------------------------------------------
 # Helpers — file discovery
 # -----------------------------------------------------------------------------
-
-def find_cope_dirs(base_dir, task_filters, copes, subjects=None):
-    """
-    Find all cope*.feat dirs inside matching .gfeat directories.
-    Returns a list of (gfeat_dir, cope_dir) tuples.
-    """
-    all_gfeats = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.gfeat")))
-    filtered   = [d for d in all_gfeats
-                  if any(task in os.path.basename(d) for task in task_filters)]
-    if subjects is not None:
-        filtered = [d for d in filtered
-                    if any(sub in os.path.basename(d) for sub in subjects)]
-
-    results = []
-    for gfeat_dir in filtered:
-        for cope in copes:
-            cope_dir = os.path.join(gfeat_dir, cope)
-            if os.path.isdir(cope_dir):
-                results.append((gfeat_dir, cope_dir))
-            else:
-                print(f"  [WARN] cope dir not found: {cope_dir}")
-    return results
-
 
 def get_paths(gfeat_dir, cope_dir, roi_name, output_base):
     """Return (csv_path, png_path, html_path, fsf_path, run_name)."""
@@ -79,105 +54,8 @@ def get_paths(gfeat_dir, cope_dir, roi_name, output_base):
 
 
 # -----------------------------------------------------------------------------
-# Helpers — timing
-# -----------------------------------------------------------------------------
-
-def parse_fsf_tr_ndelete(fsf_path):
-    """Parse just TR and ndelete from a level-2 design.fsf (no block EVs)."""
-    with open(fsf_path, "r") as f:
-        content = f.read()
-
-    def get_val(key, cast=float):
-        m = re.search(rf'set fmri\({re.escape(key)}\)\s+([^\s#]+)', content)
-        if m:
-            return cast(m.group(1))
-        raise ValueError(f"Key not found in fsf: {key}")
-
-    tr      = get_val("tr",      float)
-    ndelete = get_val("ndelete", int)
-    return tr, ndelete
-
-
-def resolve_timing(fsf_path, config_timing=None):
-    """
-    Return a timing dict for plotting.
-
-    A level-2 design.fsf has no block-design EV to parse, so block
-    onsets/offsets come only from config_timing (ROI_TASK_MAP["timing"]).
-    TR and ndelete are always read from the fsf.
-    """
-    tr, ndelete = parse_fsf_tr_ndelete(fsf_path)
-
-    onsets  = (config_timing or {}).get("block_onsets",  [])
-    offsets = (config_timing or {}).get("block_offsets", [])
-
-    return {
-        "tr"           : tr,
-        "ndelete"      : ndelete,
-        "block_onsets" : onsets,
-        "block_offsets": offsets,
-        "has_blocks"   : len(onsets) > 0,
-        "timing_source": "config" if config_timing else "none",
-    }
-
-
-# -----------------------------------------------------------------------------
-# PNG output
-# -----------------------------------------------------------------------------
-
-def save_plot(time_s, signal, timing, title, ylabel, output_path, task_color):
-    """Render and save a single matplotlib plot (raw or z-scored)."""
-    fig, (ax_bar, ax) = plt.subplots(
-        nrows=2, figsize=(14, 5),
-        gridspec_kw={"height_ratios": [1, 8], "hspace": 0.05}
-    )
-
-    ax_bar.set_xlim(time_s[0], time_s[-1])
-    ax_bar.set_ylim(0, 1)
-    ax_bar.set_axis_off()
-    ax_bar.set_title(title, fontsize=12, pad=8)
-
-    if timing["has_blocks"]:
-        task_match = re.search(r"task-([^_|\s]+)", title)
-        task_label = (task_match.group(1).capitalize() + " (ON)") if task_match else "Task (ON)"
-
-        for onset, offset in zip(timing["block_onsets"], timing["block_offsets"]):
-            ax_bar.barh(y=0.5, width=offset - onset, left=onset,
-                        height=0.6, color=task_color, align="center")
-            ax.axvspan(onset, offset, color=task_color, alpha=0.12, zorder=1)
-
-        task_patch = mpatches.Patch(color=task_color, label=task_label, alpha=0.8)
-        ax.legend(handles=[task_patch], loc="upper right", fontsize=9, framealpha=0.7)
-
-    ax.plot(time_s, signal, color="black", linewidth=0.9, zorder=3)
-
-    if "Z-score" in ylabel:
-        ax.axhline(0, color="gray", linewidth=0.7, linestyle="--", zorder=2)
-
-    ax.set_xlabel("Time (s)", fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_xlim(time_s[0], time_s[-1])
-    ax.tick_params(labelsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
-# -----------------------------------------------------------------------------
 # HTML output (BOLD panels only — no motion .par at level 2)
 # -----------------------------------------------------------------------------
-
-def _parse_feat_meta(run_name):
-    """Extract sub/ses/task/run from a BIDS-style gfeat/cope run name."""
-    fields = {}
-    for key in ("sub", "ses", "task", "run"):
-        m = re.search(rf'({key}-[^_]+)', run_name)
-        fields[key] = m.group(1) if m else ""
-    return fields
-
 
 def save_html(bold, timing, run_name, roi_name, output_path):
     """Render a two-panel interactive HTML QC plot (raw + z-scored BOLD)."""
@@ -185,7 +63,7 @@ def save_html(bold, timing, run_name, roi_name, output_path):
     ndelete = timing["ndelete"]
     n_vols  = len(bold)
 
-    meta = _parse_feat_meta(run_name)
+    meta = parse_feat_meta(run_name)
     meta_str = " · ".join(v for v in [
         meta["sub"], meta["ses"], meta["task"], meta["run"], roi_name
     ] if v)

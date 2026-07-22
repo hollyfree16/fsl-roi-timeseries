@@ -15,46 +15,20 @@ Usage:
 """
 
 import os
-import glob
 import argparse
 import subprocess
 import pandas as pd
 from multiprocessing import Pool, cpu_count
-from config_featquery import (
+from config.config_featquery import (
     FEATQUERY_BIN, FEAT_BASE, STATS_IMAGES,
     FEATQUERY_FLAGS, ROI_TASK_MAP, SUBJECTS
 )
+from util.discovery import find_feat_dirs, get_existing_stats
 
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-
-def find_feat_dirs(base_dir, task_filters, subjects=None):
-    """
-    Find all .feat dirs whose basename contains any task in task_filters.
-    If subjects is a list, only include dirs matching those subject IDs.
-    """
-    all_dirs = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.feat")))
-    filtered = [d for d in all_dirs
-                if any(task in os.path.basename(d) for task in task_filters)]
-    if subjects is not None:
-        filtered = [d for d in filtered
-                    if any(sub in os.path.basename(d) for sub in subjects)]
-    return filtered
-
-
-def get_existing_stats(feat_dir, stats_images):
-    """Return only the stats image paths that actually exist in feat_dir."""
-    existing = []
-    for img in stats_images:
-        # FSL stores without extension internally; check both with and without
-        path_no_ext = os.path.join(feat_dir, img)
-        path_nii_gz = os.path.join(feat_dir, img + ".nii.gz")
-        if os.path.exists(path_nii_gz) or os.path.exists(path_no_ext):
-            existing.append(img)
-    return existing
-
 
 def run_featquery(feat_dir, roi_path, roi_name, stats_images,
                   flags, dry_run=False):

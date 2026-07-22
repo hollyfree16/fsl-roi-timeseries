@@ -26,187 +26,19 @@ Usage:
 """
 
 import os
-import glob
 import argparse
 import numpy as np
 import nibabel as nib
 import pandas as pd
-from config_extract_level2 import FEAT_BASE, OUTPUT_BASE, ROI_TASK_MAP, SUBJECTS
-
-
-# -----------------------------------------------------------------------------
-# Motion helpers
-# -----------------------------------------------------------------------------
-
-def load_motion_params(cope_dir):
-    """
-    Load the FSL motion parameter file from the standard location.
-    Returns an (N, 6) array [rotX, rotY, rotZ, transX, transY, transZ]
-    or None if the file is not found (expected at level 2 — no .par file).
-    """
-    par_path = os.path.join(cope_dir, "mc", "prefiltered_func_data_mcf.par")
-    if not os.path.exists(par_path):
-        return None
-    try:
-        return np.loadtxt(par_path)
-    except Exception:
-        return None
-
-
-def compute_fd(motion_params):
-    """
-    Compute framewise displacement from an (N, 6) motion parameter array.
-    Rotations (first 3 columns) are converted from radians to mm using a
-    50 mm head-radius assumption. Returns a 1-D array of length N (FD[0] = 0).
-    """
-    diff = np.diff(motion_params, axis=0, prepend=motion_params[[0]])
-    diff[:, :3] *= 50.0
-    return np.abs(diff).sum(axis=1)
-
-
-def motion_columns(motion_params, n_tp):
-    """
-    Return a dict of motion column arrays aligned to n_tp timepoints.
-    If motion_params is None or length-mismatched, returns NaN arrays.
-    """
-    col_names = ["rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z", "fd"]
-    nan_cols  = {c: np.full(n_tp, np.nan) for c in col_names}
-
-    if motion_params is None:
-        return nan_cols
-
-    fd = compute_fd(motion_params)
-
-    if len(fd) != n_tp:
-        print(f"    [WARN] Motion params length ({len(fd)}) != timeseries length ({n_tp}) — filling with NaN")
-        return nan_cols
-
-    return {
-        "rot_x"  : motion_params[:, 0],
-        "rot_y"  : motion_params[:, 1],
-        "rot_z"  : motion_params[:, 2],
-        "trans_x": motion_params[:, 3],
-        "trans_y": motion_params[:, 4],
-        "trans_z": motion_params[:, 5],
-        "fd"     : fd,
-    }
-
-
-# -----------------------------------------------------------------------------
-# Z-stat helpers
-# -----------------------------------------------------------------------------
-
-def _peak_voxel(data, mask_bool):
-    """
-    Return (peak_value, (i, j, k)) for the maximum of data within mask_bool.
-    Returns (nan, (None, None, None)) if mask_bool is empty.
-    """
-    if mask_bool.sum() == 0:
-        return np.nan, (None, None, None)
-    masked = np.where(mask_bool, data, -np.inf)
-    idx    = np.unravel_index(np.argmax(masked), masked.shape)
-    return float(data[idx]), idx
-
-
-def compute_zstat_metrics(cope_dir, roi_bin, extraction_mask=None):
-    """
-    Compute average/peak z-stat and suprathreshold voxel count for an ROI.
-
-    Reads directly from the cope*.feat dir's own stats images (independent
-    of featquery/cluster_mask), so this works even for non-responders. Peak
-    voxel coordinates are native functional-space voxel indices (i, j, k),
-    matching the space of the QC mask, for easy lookup in FSLeyes.
-
-    Returns a dict with keys:
-        mean_zstat_roi             : mean of raw stats/zstat1.nii.gz across the
-                                      whole native-space ROI mask
-        peak_zstat_roi              : max of raw z-stat across the whole ROI mask
-        peak_vox_roi_x/y/z          : voxel coords of that peak (native space)
-        mean_zstat_extraction       : mean of raw z-stat across the extraction
-                                       mask (largest cluster ∩ ROI), NaN if no
-                                       extraction mask was passed
-        peak_zstat_extraction       : max of raw z-stat across the extraction mask
-        peak_vox_extraction_x/y/z   : voxel coords of that peak (native space)
-        n_suprathreshold_vox       : voxels in the ROI where thresh_zstat1.nii.gz
-                                      (FSL's cluster-corrected thresholded map)
-                                      is nonzero
-        mean_suprathreshold_zstat  : mean of thresh_zstat1.nii.gz among those
-                                      suprathreshold voxels only, NaN if none
-    """
-    metrics = {
-        "mean_zstat_roi"           : np.nan,
-        "peak_zstat_roi"           : np.nan,
-        "peak_vox_roi_x"           : None,
-        "peak_vox_roi_y"           : None,
-        "peak_vox_roi_z"           : None,
-        "mean_zstat_extraction"    : np.nan,
-        "peak_zstat_extraction"    : np.nan,
-        "peak_vox_extraction_x"    : None,
-        "peak_vox_extraction_y"    : None,
-        "peak_vox_extraction_z"    : None,
-        "n_suprathreshold_vox"     : None,
-        "mean_suprathreshold_zstat": np.nan,
-    }
-
-    zstat_path        = os.path.join(cope_dir, "stats", "zstat1.nii.gz")
-    thresh_zstat_path = os.path.join(cope_dir, "thresh_zstat1.nii.gz")
-    roi_bool           = roi_bin.astype(bool)
-
-    if os.path.exists(zstat_path):
-        zstat_data = nib.load(zstat_path).get_fdata()
-        if roi_bool.sum() > 0:
-            metrics["mean_zstat_roi"] = float(zstat_data[roi_bool].mean())
-            peak_val, (px, py, pz) = _peak_voxel(zstat_data, roi_bool)
-            metrics["peak_zstat_roi"] = peak_val
-            metrics["peak_vox_roi_x"], metrics["peak_vox_roi_y"], metrics["peak_vox_roi_z"] = px, py, pz
-        if extraction_mask is not None:
-            extraction_bool = extraction_mask.astype(bool)
-            if extraction_bool.sum() > 0:
-                metrics["mean_zstat_extraction"] = float(zstat_data[extraction_bool].mean())
-                peak_val, (px, py, pz) = _peak_voxel(zstat_data, extraction_bool)
-                metrics["peak_zstat_extraction"] = peak_val
-                metrics["peak_vox_extraction_x"], metrics["peak_vox_extraction_y"], metrics["peak_vox_extraction_z"] = px, py, pz
-    else:
-        print(f"    [WARN] No stats/zstat1.nii.gz found — z-stat columns will be NaN")
-
-    if os.path.exists(thresh_zstat_path):
-        thresh_data  = nib.load(thresh_zstat_path).get_fdata()
-        supra_in_roi = (thresh_data != 0) & roi_bool
-        metrics["n_suprathreshold_vox"] = int(supra_in_roi.sum())
-        if supra_in_roi.sum() > 0:
-            metrics["mean_suprathreshold_zstat"] = float(thresh_data[supra_in_roi].mean())
-    else:
-        print(f"    [WARN] No thresh_zstat1.nii.gz found — suprathreshold columns will be NaN")
-
-    return metrics
+from config.config_extract_level2 import FEAT_BASE, OUTPUT_BASE, ROI_TASK_MAP, SUBJECTS
+from util.discovery import find_cope_dirs
+from util.motion import load_motion_params, motion_columns
+from util.zstat import compute_zstat_metrics
 
 
 # -----------------------------------------------------------------------------
 # Helpers — file discovery
 # -----------------------------------------------------------------------------
-
-def find_cope_dirs(base_dir, task_filters, copes, subjects=None):
-    """
-    Find all cope*.feat dirs inside matching .gfeat directories.
-    Returns a list of (gfeat_dir, cope_dir) tuples.
-    """
-    all_gfeats = sorted(glob.glob(os.path.join(base_dir, "sub-*", "ses-*", "*.gfeat")))
-    filtered   = [d for d in all_gfeats
-                  if any(task in os.path.basename(d) for task in task_filters)]
-    if subjects is not None:
-        filtered = [d for d in filtered
-                    if any(sub in os.path.basename(d) for sub in subjects)]
-
-    results = []
-    for gfeat_dir in filtered:
-        for cope in copes:
-            cope_dir = os.path.join(gfeat_dir, cope)
-            if os.path.isdir(cope_dir):
-                results.append((gfeat_dir, cope_dir))
-            else:
-                print(f"  [WARN] cope dir not found: {cope_dir}")
-    return results
-
 
 def get_output_paths(gfeat_dir, cope_dir, roi_name, output_base):
     """Return (csv_path, mask_path, run_name) for a given gfeat/cope dir and ROI."""

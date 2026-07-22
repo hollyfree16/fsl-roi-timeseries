@@ -15,10 +15,11 @@ For each subject and task, the pipeline:
 - FSL 6.x (specifically `featquery`)
 - Python 3.8+
 - Python packages: `numpy`, `nibabel`, `pandas`, `matplotlib`
+- `pytest` (optional, for running the test suite)
 
 Install Python dependencies:
 ```bash
-pip install numpy nibabel pandas matplotlib
+pip install numpy nibabel pandas matplotlib pytest
 ```
 
 ---
@@ -27,19 +28,30 @@ pip install numpy nibabel pandas matplotlib
 
 ```
 fsl-roi-timeseries/
-├── config_featquery.py            # Config for step 1 (level 1)
-├── config_extract.py              # Config for step 2 (level 1)
-├── config_plot.py                 # Config for step 3 (level 1)
-├── run_featquery.py                # Step 1: run FSL featquery
-├── extract_timeseries.py           # Step 2: extract mean BOLD time series
-├── plot_timeseries.py              # Step 3: plot time series with task blocks
+├── run_featquery.py                 # Step 1: run FSL featquery
+├── extract_timeseries.py            # Step 2: extract mean BOLD time series
+├── plot_timeseries.py               # Step 3: plot time series with task blocks
 │
-├── config_featquery_level2.py      # Config for step 1 (level 2 / .gfeat)
-├── config_extract_level2.py        # Config for step 2 (level 2 / .gfeat)
-├── config_plot_level2.py           # Config for step 3 (level 2 / .gfeat)
-├── run_featquery_level2.py         # Step 1: run FSL featquery on .gfeat/cope*.feat
-├── extract_timeseries_level2.py    # Step 2: extract mean BOLD time series (level 2)
-└── plot_timeseries_level2.py       # Step 3: plot time series (level 2)
+├── run_featquery_level2.py          # Step 1: run FSL featquery on .gfeat/cope*.feat
+├── extract_timeseries_level2.py     # Step 2: extract mean BOLD time series (level 2)
+├── plot_timeseries_level2.py        # Step 3: plot time series (level 2)
+│
+├── config/
+│   ├── config_featquery.py          # Config for step 1 (level 1)
+│   ├── config_extract.py            # Config for step 2 (level 1)
+│   ├── config_plot.py               # Config for step 3 (level 1)
+│   ├── config_featquery_level2.py   # Config for step 1 (level 2 / .gfeat)
+│   ├── config_extract_level2.py     # Config for step 2 (level 2 / .gfeat)
+│   └── config_plot_level2.py        # Config for step 3 (level 2 / .gfeat)
+│
+├── util/                            # Shared helpers used across both pipelines
+│   ├── discovery.py                 # find_feat_dirs, find_cope_dirs, get_existing_stats
+│   ├── motion.py                    # motion .par loading, FD, outlier detection
+│   ├── zstat.py                     # z-stat / suprathreshold voxel metrics
+│   ├── fsf.py                       # design.fsf timing parsing
+│   └── plotting.py                  # shared PNG rendering + BIDS name parsing
+│
+└── tests/                           # pytest unit tests for util/
 ```
 
 The `level2` scripts are a parallel pipeline for FSL's higher-level (group,
@@ -215,6 +227,19 @@ pick up where it left off without reprocessing completed subjects. In
 `plot_timeseries.py`, each output file (raw PNG, z-scored PNG, HTML QC) is
 tracked independently, so a partially-completed run only regenerates what's
 missing rather than redoing all three.
+
+---
+
+## Testing
+
+Unit tests cover the shared logic in `util/` (motion/FD math, `design.fsf`
+parsing, z-stat metrics, FEAT/gfeat directory discovery, plotting helpers)
+using synthetic data and `tmp_path` fixtures — no FSL install or real FEAT
+data required.
+
+```bash
+pytest
+```
 
 ---
 
